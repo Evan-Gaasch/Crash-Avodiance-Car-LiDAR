@@ -1,0 +1,89 @@
+#DemoV1
+
+#imports
+import pygame
+import RPi.GPIO as GPIO
+from signal import pause
+import time, serial, math #, os, pygame
+from adafruit_rplidar import RPLidar
+
+#pygame setup
+
+pygame.init()
+display = pygame.display.set_mode((320,240)) #what does this line do?
+
+pygame.mouse.set_visible(False)
+display.fill((0,0,0)) #fill screen with black
+pygame.display.update() #update screen
+
+pointWidth = 2 #tune
+
+# used to scale data to fit on the screen
+maxDistance = 0
+
+GPIO.setmode(GPIO.BCM)
+
+#pin for the speed of lidar rotation
+lidarSpeedPin=23 # was 16
+GPIO.setup(lidarSpeedPin,GPIO.OUT)
+
+lidarSpeed=GPIO.PWM(lidarSpeedPin, 100)  #1000 is frequency of pwm cycle
+lidarSpeed.start(100) #100 is max rotation speed
+
+#setup USB
+PORT_NAME = '/dev/ttyUSB0'
+lidar = RPLidar(None, PORT_NAME)
+
+
+scanAngDist=[0]*360 #list with all of the angles and distances from
+
+#main loop:
+       
+while True:
+   
+    scanAngDist=[0]*360
+    lastAngDist = [0]*360
+   
+    #lidar setup
+    lidarSpeed.start(100)
+    lidar = RPLidar(None, PORT_NAME, timeout=3)
+   
+    #start scan
+    for scan in lidar.iter_scans(): # record all ang and dist for a revolution (throws errors?)
+        for i in range (360):
+            lastAngDist[i] = scanAngDist[i]
+        for (_, angle, distance) in scan:
+           
+            #lidar outputs distance in millimeters
+            distance /= 10 #convert distance from millimeters to centimeters
+           
+           
+            if angle > 359:
+                angle = 0 #fixes list index error?
+               
+            scanAngDist[int(angle)] = distance # a list of all angles and distance
+
+        for i in range (0,360):
+            newX = scanAngDist[i]*math.sin(math.radians(i))
+            newY = scanAngDist[i]*math.cos(math.radians(i))
+           
+            maxDistance = 200 #cm
+           
+         
+           
+            #delete old points
+            if (scanAngDist[i] - lastAngDist[i] >= 10 or scanAngDist[i] - lastAngDist[i] >= 10) and scanAngDist[i] <= maxDistance:
+                #draw black squares where the old red was
+                oldX = lastAngDist[i]*math.sin(math.radians(i))
+                oldY = lastAngDist[i]*math.cos(math.radians(i))
+               
+                pygame.draw.rect(display,(0,0,0),(int(oldX)+160,int(oldY)+120,pointWidth+10,pointWidth+10))
+               
+            pygame.display.update() #update screen
+       
+            #draw new points
+            if distance <= maxDistance:
+                pygame.draw.rect(display,(255,0,0),(int(newX)+160,int(newY)+120,pointWidth,pointWidth))
+       
+       
+        #display.fill((0,0,0)) #fill screen with black
