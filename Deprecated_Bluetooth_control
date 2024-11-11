@@ -1,0 +1,248 @@
+import RPi.GPIO as GPIO
+from signal import pause
+import time, serial, math #, os, pygame
+from adafruit_rplidar import RPLidar
+from bluedot import BlueDot
+import math
+
+
+#pins for the pi outputs
+
+steerServoPin = 4 #Servo, was pin 7
+GPIO.setup(steerServoPin,GPIO.OUT) #sets gpio pin 4 as an output
+
+#pins for rear motor. there 2 pins + enable so the motor can switch direction
+
+motorDrive1 = 27 #was 13 in BOARD mode
+motorDrive2=17 #was 11
+motorDriveEnable=22 #was 15
+
+#sets pins as output
+GPIO.setup(motorDrive1,GPIO.OUT)
+GPIO.setup(motorDrive2,GPIO.OUT)
+GPIO.setup(motorDriveEnable,GPIO.OUT)
+
+#pin for the speed of lidar rotation
+lidarSpeedPin=23 # was 16
+GPIO.setup(lidarSpeedPin,GPIO.OUT)
+
+lidarSpeed=GPIO.PWM(lidarSpeedPin, 100)  #1000 is frequency of pwm cycle
+lidarSpeed.start(100) #100 is max rotation speed
+
+
+#both drive motor pins are low so the car does not move yet
+GPIO.output(motorDrive1,GPIO.LOW)
+GPIO.output(motorDrive2,GPIO.LOW)
+
+#set up rear motor
+mainMotor = GPIO.PWM(motorDriveEnable,1000)
+mainMotor.start(0)
+mainMotor.ChangeDutyCycle(0)
+
+#setup USB
+PORT_NAME = '/dev/ttyUSB0'
+lidar = RPLidar(None, PORT_NAME)
+
+
+steerServo = GPIO.PWM(steerServoPin,50) #50 times per second
+steerServo.start(0)
+
+#servo properties
+maxSteerAngle=110 #degrees, 90 is straight ahead
+minSteerAngle=70# steering arm can only move so much
+steeringChange=9 #interval of steering change (not useful right now?)
+steerAngle=90  #90 is straight ahead
+
+steerServo.ChangeDutyCycle((steerAngle/18)) #based on steer angle, servo moves
+steerServo.ChangeDutyCycle(0) #stops servo movement
+
+scanAngDist=[0]*360 #list with all of the angles and distances from lidar scan
+
+onlyStopDistThreshold = 30 #only stop (because of the traction circle)
+stopDistThreshold=50 #stop and turn
+turnDistThreshold=70 #just swerve, tune
+
+
+#servo limits (guess)
+
+steerMaxAng = 9 #TUNE
+steerMinAng = 3 #TUNE
+steerCenterAng = 5 #? This is a guess
+
+#random timer variable
+timerVar = 1
+
+
+
+#blue dot bluetooth library
+
+
+
+bd = BlueDot()
+
+
+#loop variable:
+robotRunning = True
+
+#data for slowing down
+carStopped = False
+slowDownCounts = 0 #to decide how long to go into reverse
+
+def dpad(pos): #blue dot library subroutine
+
+    if pos.top: #forward
+        print("bluetooth up pos")
+        GPIO.output(motorDrive1,GPIO.LOW)
+        GPIO.output(motorDrive2,GPIO.HIGH)
+        for i in range (20):
+            mainMotor.ChangeDutyCycle(100)
+
+
+
+    elif pos.bottom:
+        print("bluetooth down pos")
+        GPIO.output(motorDrive1,GPIO.HIGH)
+        GPIO.output(motorDrive2,GPIO.LOW)
+        for i in range (20):
+           mainMotor.ChangeDutyCycle(100)
+
+
+
+    elif pos.left:
+        print("bluetooth left pos")
+        steerServo.ChangeDutyCycle(steerMinAng)
+
+
+    elif pos.right:
+        print("bluetooth right pos")
+        steerServo.ChangeDutyCycle(steerMaxAng)
+
+
+    elif pos.middle:
+        print("bluetooth center pos (stop)")
+        GPIO.output(motorDrive1,GPIO.LOW)
+        GPIO.output(motorDrive2,GPIO.LOW)
+        steerServo.ChangeDutyCycle(steerCenterAng)
+
+
+#main loop:
+
+
+while robotRunning:
+    turnAngle = 0 #used to store turn angle before moving the servo
+
+    autoControl = False  #car not trying to take control
+
+    scanAngDist=[0]*360
+
+    #lidar setup
+    lidarSpeed.start(100)
+    lidar = RPLidar(None, PORT_NAME, timeout=3)
+
+    #start scan
+    for scan in lidar.iter_scans(): # record all ang and dist for a
+revolution (throws errors?)
+
+        for (_, angle, distance) in scan:
+
+            #lidar outputs distance in decimeters
+            distance /= 10 #convert distance from decimeters to meters
+            if len(scanAngDist) >= 360:
+                scanAngDist[int(angle)]=int(distance) # a list of all
+angles and distance
+                # ^^^ glitchy!
+
+
+
+
+
+
+
+        for i in range (1,60): #degrees, 0 is front for lidar so front right
+            if scanAngDist[i] <= turnDistThreshold and scanAngDist[i] != 0:
+                autoControl = True
+                steerServo.ChangeDutyCycle(steerMinAng)
+
+                if scanAngDist[i] <= stopDistThreshold:
+
+
+                    #reverse then stop (to stop faster because of intertia)
+                    if not carStopped:
+                        GPIO.output(motorDrive1,GPIO.HIGH)
+                        GPIO.output(motorDrive2,GPIO.LOW)
+                        for i in range (20):
+                            mainMotor.ChangeDutyCycle(100)
+                        startTime = time.time()
+
+                    currentTime = time.time()
+
+                    if currentTime-startTime != 0: #seconds
+                        print("stopping motors")
+                        GPIO.output(motorDrive1,GPIO.LOW)
+                        GPIO.output(motorDrive2,GPIO.LOW)
+                        for i in range (20):
+                            mainMotor.ChangeDutyCycle(0)
+
+                        carStopped = True
+
+
+                    if scanAngDist[i] <= onlyStopDistThreshold:
+                        steerServo.ChangeDutyCycle(steerCenterAng)
+
+
+
+
+
+
+        for i in range (320,360): #degrees, 0 is front for lidar so front left
+            if scanAngDist[i] <= turnDistThreshold and scanAngDist[i] != 0:
+                autoControl = True
+                steerServo.ChangeDutyCycle(steerMaxAng)
+
+                if scanAngDist[i] <= stopDistThreshold:
+
+
+                    #reverse then stop (to stop faster because of intertia)
+                    if not carStopped:
+                        GPIO.output(motorDrive1,GPIO.HIGH)
+                        GPIO.output(motorDrive2,GPIO.LOW)
+                        for i in range (20):
+                            mainMotor.ChangeDutyCycle(100)
+                        if timerVar == 1:
+                            startTime = time.time() #so the start time
+doesnt change
+                            timerVar = 2
+
+                    currentTime = time.time()
+
+                    if currentTime-startTime != 0: #seconds
+                        print("stopping motors")
+                        GPIO.output(motorDrive1,GPIO.LOW)
+                        GPIO.output(motorDrive2,GPIO.LOW)
+                        for i in range (20):
+                            mainMotor.ChangeDutyCycle(0)
+
+                        carStopped = True
+
+
+                    if scanAngDist[i] <= onlyStopDistThreshold:
+                        steerServo.ChangeDutyCycle(steerCenterAng)
+
+
+
+
+
+
+
+        scanAngDist=[0]*360 #reset data
+
+
+
+        if not autoControl: #if the car is not trying to take control
+            bd.when_pressed = dpad #control the car from blue dot
+            carStopped = False
+
+
+        autoControl = False
+        #reset car slow down attributes
+#         carStopped = False  
