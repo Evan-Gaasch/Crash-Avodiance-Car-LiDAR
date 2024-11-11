@@ -1,0 +1,62 @@
+import os
+import math
+from math import floor
+from adafruit_rplidar import RPLidar
+import time
+import pigpio
+import RPi.GPIO as GPIO
+
+GPIO.setwarnings(False)
+GPIO.setmode(GPIO.BCM)
+pwm=pigpio.pi()
+
+
+lidar_rotation_speed_pin=4 #this is GPIO4 physical pin 7 used to control lidar rotation speed
+#pwm.set_mode(lidar_rotation_speed_pin, pigpio.OUTPUT)
+GPIO.setup(lidar_rotation_speed_pin,GPIO.OUT)
+lidar_speed=GPIO.PWM(lidar_rotation_speed_pin, 1000)  #1000 is frequency of pwm cycle
+lidar_speed.start(100)
+
+scanangdist=[0]*360 #each entry represents an angle
+# Setup the RPLidar
+PORT_NAME = '/dev/ttyUSB0'  #USB location of lidar
+
+scan_data = [0]*360 # an array of 360 each point set to Zero, the element pointer represents the angle
+datapointsperscan=150  #how many scan data points before ending scan loop
+
+def clearlidar():
+    for c in range(0,360):
+        scanangdist[c]=0
+def scanlidar():
+  lidar = RPLidar(None, PORT_NAME, timeout=3)
+  totaldatapoints=0
+  for scan in lidar.iter_scans(): # record all ang and dist for a revolution
+    counter=0
+    for (_, angle, distance) in scan:
+        if distance != 0:
+            counter=counter+1
+            tempelement1=int(floor(angle))
+            scanangdist[int(angle)]=int(distance/10)
+    totaldatapoints=totaldatapoints+counter #number of values in last scan
+    if(totaldatapoints>datapointsperscan):
+        print(totaldatapoints)
+        clearlidar()
+        lidar.stop()
+        break
+    
+
+def printscanangdist():            
+  for p in range(0,360):
+    print("Angle,  ",p,"  Distance,   ",scanangdist[p])
+
+
+  
+  
+
+#start main program
+for i in range(0,20):
+    scanlidar()
+    clearlidar()
+    time.sleep(.1)
+    print("Frame")
+lidar_speed.start(0)
