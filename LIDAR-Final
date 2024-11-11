@@ -1,0 +1,341 @@
+import RPi.GPIO as GPIO
+from signal import pause
+import time, serial, math #, os, pygame
+from adafruit_rplidar import RPLidar
+from bluedot import BlueDot
+import numpy as np
+GPIO.setmode(GPIO.BCM)
+#pins for the pi outputs
+
+steerServoPin = 4 #Servo, was pin 7
+GPIO.setup(steerServoPin,GPIO.OUT) #sets gpio pin 4 as an output
+
+#pins for rear motor. there 2 pins + enable so the motor can switch direction
+
+motorDrive1 = 27 #was 13 in BOARD mode
+motorDrive2=17 #was 11
+motorDriveEnable=22 #was 15
+
+#sets pins as output
+GPIO.setup(motorDrive1,GPIO.OUT)
+GPIO.setup(motorDrive2,GPIO.OUT)
+GPIO.setup(motorDriveEnable,GPIO.OUT)
+
+#pin for the speed of lidar rotation
+lidarSpeedPin=23 # was 16
+GPIO.setup(lidarSpeedPin,GPIO.OUT)
+
+lidarSpeed=GPIO.PWM(lidarSpeedPin, 100)  #1000 is frequency of pwm cycle
+lidarSpeed.start(100) #100 is max rotation speed
+
+
+#both drive motor pins are low so the car does not move yet
+GPIO.output(motorDrive1,GPIO.LOW)
+GPIO.output(motorDrive2,GPIO.LOW)
+
+#set up rear motor
+mainMotor = GPIO.PWM(motorDriveEnable,1000)
+mainMotor.start(0)
+mainMotor.ChangeDutyCycle(0)
+
+#setup USB
+PORT_NAME = '/dev/ttyUSB0'
+lidar = RPLidar(None, PORT_NAME)
+
+
+steerServo = GPIO.PWM(steerServoPin,50) #50 times per second
+steerServo.start(0)
+
+steerServo.ChangeDutyCycle(0) #stops servo movement
+
+scanAngDist=[0]*360 #list with all of the angles and distances from
+
+
+#detection parameters
+
+rectWidth = 20 #tune, is half the size of total width so 60 total cm
+rectDepth = 80 #tune, also is dist when car turns (for testing, 120, for desk use 90)
+brakeDist = 60
+rightModifier = 10
+rectMaxDepth = 140
+brakeMaxDepth = 130
+localDepth = 0
+localBrakeDepth = 0
+
+#speakerpin
+speakerPin = 26
+GPIO.setup(speakerPin,GPIO.OUT)
+GPIO.output(speakerPin,GPIO.LOW)
+
+#detection variables:
+global rightDetected
+rightDetected = False
+
+global leftDetected
+leftDetected = False #if both, use quick stopping algorithm
+
+
+global timerStart
+timerStart = 0
+
+
+
+global accelTimer
+accelTimer = 0
+
+
+#servo limits (guess)
+
+steerMaxAng = 5.6 #tuned
+steerMinAng = 4.7 #tuned
+steerCenterAng = 5.15 #tuned
+
+
+scanRightDist = []
+scanLeftDist = []
+#blue dot bluetooth library
+
+global startTime
+startTime = time.perf_counter()
+
+global stopped
+stopped = True
+
+braking = False
+
+def dpad(pos): #blue dot library subroutine
+    global timerStart
+    global leftDetected
+    global rightDetected
+    global startTime
+    global stopped
+    if pos.top: #forward
+        #reset variables:
+        accelTimer = 0
+        timerStart = 0
+        leftDetected = False
+        rightDetected = False
+       
+        print("bluetooth up pos")
+        GPIO.output(motorDrive1,GPIO.LOW)
+        GPIO.output(motorDrive2,GPIO.HIGH)
+        for i in range (20):
+            mainMotor.ChangeDutyCycle(65) #100 might burn motor up!!
+        #start accelTimer variable
+        startTime = time.perf_counter()
+        stopped = False
+       
+    elif pos.bottom:
+        print("bluetooth down pos")
+        GPIO.output(motorDrive1,GPIO.HIGH)
+        GPIO.output(motorDrive2,GPIO.LOW)
+        for i in range (20):
+           mainMotor.ChangeDutyCycle(65) #20 way too low, 50?
+       
+       
+       
+    elif pos.left:
+        print("bluetooth left pos")
+        steerServo.ChangeDutyCycle(steerMinAng)
+#         steerServo.start(0)
+       
+    elif pos.right:
+        print("bluetooth right pos")
+        steerServo.ChangeDutyCycle(steerMaxAng)
+#         steerServo.start(0)
+       
+    elif pos.middle:
+        print("bluetooth center pos (stop)")
+        GPIO.output(motorDrive1,GPIO.LOW)
+        GPIO.output(motorDrive2,GPIO.LOW)
+        steerServo.ChangeDutyCycle(steerCenterAng)
+#         steerServo.start(0)
+        stopped = True
+
+def speaker():
+    for i in range(0,50):
+        GPIO.output(speakerPin,GPIO.HIGH)
+        time.sleep(0.00125)
+        GPIO.output(speakerPin,GPIO.LOW)
+        time.sleep(0.00125)
+   
+#main loop:
+       
+bd = BlueDot()
+while True:
+    emergencyBrake = False
+    autoControl = False  #car not trying to take control
+    scanAngDist=[0]*360
+   
+    #lidar setup
+    lidarSpeed.start(100)
+    lidar = RPLidar(None, PORT_NAME, timeout=3)
+   
+    #start scan
+   
+    for scan in lidar.iter_scans(): # record all ang and dist for a revolution (throws errors?)
+         
+        for (_, angle, distance) in scan:
+           
+            #lidar outputs distance in millimeters
+            distance /= 10 #convert distance from millimeters to centimeters
+           
+           
+            if angle > 359:
+                angle = 0 #fixes list index error?
+               
+            scanAngDist[int(angle)] = distance # a list of all angles and distance
+           
+       
+        for i in range (0,50):
+            if time.perf_counter()-startTime >= 3 and not stopped:
+                localDepth = rectMaxDepth
+                localBrakeDepth = brakeMaxDepth
+            else:
+                localDepth = rectDepth #2 step dynamic zones
+                localBrakeDepth = brakeDist
+            #print(localDepth)
+           
+            if scanAngDist[i] > 0 and scanAngDist[i] <= localDepth:
+                #convert to cartesian coords:
+                obstacleX = scanAngDist[i]*math.sin(math.radians(i))
+                obstacleY = scanAngDist[i]*math.cos(math.radians(i))
+#                 print("obstacle x",obstacleX,"obstacle y",obstacleY)
+
+               
+                if obstacleX <= (rectWidth+rightModifier):
+                    autoControl = True
+                   
+                    #speaker code
+                    GPIO.output(speakerPin,GPIO.HIGH)
+                   
+                    #obstacle is in rectangle
+#                     print("obstacle x",obstacleX,"obstacle y",obstacleY)
+                   
+                    steerServo.ChangeDutyCycle(steerMinAng)
+                   
+                    leftDetected = True
+                   
+                    if obstacleY <= localBrakeDepth: # and not emergencyBrake: #close obstacle
+                        #turn off motors
+                        GPIO.output(motorDrive1,GPIO.LOW)
+                        GPIO.output(motorDrive2,GPIO.LOW)
+                        if not braking:
+                            accelTimer = time.perf_counter() - startTime
+                        braking = True
+                    else:
+                        braking = False
+       
+               
+        #GPIO.output(speakerPin,GPIO.LOW)
+           
+        for i in range (310,360):
+            if time.perf_counter()-startTime >= 3 and not stopped:
+                localDepth = rectMaxDepth
+                localBrakeDepth = brakeMaxDepth
+            else:
+                localDepth = rectDepth #2 step dynamic zones
+                localBrakeDepth = brakeDist
+            #print(localDepth)
+           
+            if scanAngDist[i] > 0 and scanAngDist[i] <= localDepth:
+                #convert to cartesian coords:
+                obstacleX = scanAngDist[i]*math.sin(math.radians(i))
+                obstacleY = scanAngDist[i]*math.cos(math.radians(i))
+               
+               
+                if obstacleX >= (rectWidth*-1):
+                   
+                    autoControl = True
+                    rightDetected = True
+                   
+                    #speaker code
+                    GPIO.output(speakerPin,GPIO.HIGH)
+                   
+#                     print("obstacle x",obstacleX,"obstacle y",obstacleY)
+                   
+                    #obstacle is in rectangle
+                    steerServo.ChangeDutyCycle(steerMaxAng)
+                    if obstacleY <= localBrakeDepth: # and not emergencyBrake: #close obstacle
+                        #turn off motors
+                        GPIO.output(motorDrive1,GPIO.LOW)
+                        GPIO.output(motorDrive2,GPIO.LOW)
+                        if not braking:
+                            accelTimer = time.perf_counter() - startTime
+                        braking = True
+                    else:
+                        braking = False
+                       
+       
+       
+           
+               
+            #GPIO.output(speakerPin,GPIO.LOW)
+               
+               
+
+        if (rightDetected and leftDetected): #or braking: #obstacles everywhere, tune
+            #figure out which way to turn:
+           
+            #acceltimer
+#              global startTime
+            #accelTimer = time.perf_counter() - startTime
+#            print("accelTimer",accelTimer)
+            for i in range (310,360):
+                if scanAngDist[i] != 0 and scanAngDist[i]*math.cos(math.radians(i)) and scanAngDist[i]*math.sin(math.radians(i)):
+                   
+                    scanRightDist.append(scanAngDist[i]) #creates a new list
+           
+            for i in range (0,50):
+                if scanAngDist[i] != 0 and scanAngDist[i]*math.cos(math.radians(i)) and scanAngDist[i]*math.sin(math.radians(i)):
+                    scanLeftDist.append(scanAngDist[i])
+                   
+            if len(scanLeftDist) >=1 and len(scanRightDist) >= 1:    
+                minDistLeft = min(scanLeftDist)
+                minDistRight = min(scanRightDist)
+           
+                if minDistRight > minDistLeft:
+                    steerServo.ChangeDutyCycle(steerMinAng)
+               
+                elif minDistRight < minDistLeft:
+                    steerServo.ChangeDutyCycle(steerMaxAng)
+           
+           
+        if braking: #tune
+            #fancy stop algorithm...
+#            print("fast stopping")
+            accelTimer = time.perf_counter() - startTime
+            if timerStart == 0:
+                timerStart = time.perf_counter() +0.01
+#                emergencyBrake = True
+       
+           
+#             print("obstacles everywhere, emergency brake applied!")
+            GPIO.output(motorDrive1,GPIO.HIGH)
+            GPIO.output(motorDrive2,GPIO.LOW)
+            mainMotor.ChangeDutyCycle(65)
+           
+           
+            if time.perf_counter() - timerStart >= math.sqrt(accelTimer/5): #tune
+                GPIO.output(motorDrive1,GPIO.LOW)
+                GPIO.output(motorDrive2,GPIO.LOW)
+#                print("motors off")
+                for i in range (20):
+                    mainMotor.ChangeDutyCycle(0)
+                accelTimer = 0
+                startTimer = 0
+           
+        if not autoControl: #if the car is not trying to take control
+            bd.when_pressed = dpad #control the car from blue dot
+            scanRightDist = []
+            scanLeftDist = []
+            rightDetected = False
+            leftDetected = False
+           
+        elif autoControl:
+            speaker()
+       
+        autoControl = False
+        braking = False
+       
+        scanAngDist=[0]*360 #reset data
